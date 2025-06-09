@@ -24,6 +24,10 @@ Self Forcing trains autoregressive video diffusion models by **simulating the in
 
 ---
 
+
+https://github.com/user-attachments/assets/7548c2db-fe03-4ba8-8dd3-52d2c6160739
+
+
 ## Requirements
 We tested this repo on the following setup:
 * Nvidia GPU with at least 24 GB memory (RTX 4090, A100, and H100 are tested).
