@@ -11,6 +11,8 @@ import wandb
 import time
 import os
 
+import torch.nn as nn
+
 from utils.distributed import EMA_FSDP, barrier, fsdp_wrap, fsdp_state_dict, launch_distributed_job
 
 

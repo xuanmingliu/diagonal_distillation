@@ -3,7 +3,30 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 import torch
 
-from model.base import SelfForcingModel
+from model.base import SelfForcingModel, SpatialHead, TemporalHead, UpsamplingModule
+
+from typing import Optional, Tuple, Union
+import random
+import torch.nn as nn
+import yaml
+import argparse
+from pathlib import Path
+
+
+
+
+@torch.no_grad()
+def update_ema(target_params, source_params, rate=0.99):
+    """
+    Update target parameters to be closer to those of source parameters using
+    an exponential moving average.
+
+    :param target_params: the target parameter sequence.
+    :param source_params: the source parameter sequence.
+    :param rate: the EMA rate (closer to 1 means slower).
+    """
+    for targ, src in zip(target_params, source_params):
+        targ.detach().mul_(rate).add_(src, alpha=1 - rate)
 
 
 class DMD(SelfForcingModel):
@@ -27,6 +50,38 @@ class DMD(SelfForcingModel):
         if args.gradient_checkpointing:
             self.generator.enable_gradient_checkpointing()
             self.fake_score.enable_gradient_checkpointing()
+
+
+        self.pred_spatial_head = SpatialHead(num_channels=16, num_layers=3).to_empty(device="cuda")
+
+        self.target_spatial_head = SpatialHead(num_channels=16, num_layers=3).to_empty(device="cuda")
+        self.target_spatial_head.requires_grad_(False)
+        
+        # EMA decay rate for spatial heads
+        self.spatial_head_ema_decay = getattr(args, "spatial_head_ema_decay", 0.95)
+
+
+        def init_spatial_head(spatial_head):
+        
+            for layer in spatial_head.layers:
+                conv = layer[0] 
+                nn.init.kaiming_normal_(conv.weight, mode='fan_out', nonlinearity='leaky_relu')
+                nn.init.zeros_(conv.bias)
+            
+           
+            for layer in spatial_head.layers:
+                groupnorm = layer[1]  #
+                nn.init.ones_(groupnorm.weight)
+                nn.init.zeros_(groupnorm.bias)
+            
+        
+            nn.init.kaiming_normal_(spatial_head.conv_out.weight, mode='fan_in')
+            nn.init.zeros_(spatial_head.conv_out.bias)
+
+      
+        init_spatial_head(self.pred_spatial_head)
+
+        init_spatial_head(self.target_spatial_head)
 
         # this will be init later with fsdp-wrapped modules
         self.inference_pipeline: SelfForcingTrainingPipeline = None
@@ -56,7 +111,9 @@ class DMD(SelfForcingModel):
         estimated_clean_image_or_video: torch.Tensor,
         timestep: torch.Tensor,
         conditional_dict: dict, unconditional_dict: dict,
-        normalization: bool = True
+        normalization: bool = True,
+        pred_spatial_head=None,
+        target_spatial_head=None,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Compute the KL grad (eq 7 in https://arxiv.org/abs/2311.18828).
@@ -104,7 +161,7 @@ class DMD(SelfForcingModel):
             conditional_dict=unconditional_dict,
             timestep=timestep
         )
-
+        # 
         pred_real_image = pred_real_image_cond + (
             pred_real_image_cond - pred_real_image_uncond
         ) * self.real_guidance_scale
@@ -112,18 +169,140 @@ class DMD(SelfForcingModel):
         # Step 3: Compute the DMD gradient (DMD paper eq. 7).
         grad = (pred_fake_image - pred_real_image)
 
+
+   
+
+        cd_target = 'learn'
+        cd_target = "learn"
+        pred_fake_image_cd = self.prepare_cd_target(pred_fake_image.transpose(1,2), cd_target)
+        if cd_target in ["learn", "hlearn"]:
+            pred_fake_image_cd = pred_spatial_head(pred_fake_image_cd)
+       
+        with torch.no_grad():
+            with torch.autocast("cuda", dtype=self.dtype):
+                pred_real_image_cd = self.prepare_cd_target(pred_real_image.transpose(1,2), cd_target)
+                if cd_target in ["learn", "hlearn"]:
+                    pred_real_image_cd = target_spatial_head(pred_real_image_cd)
+
+        # if args.loss_type == "l2":
+
+        def dynamic_frame_weights(pred, target):
+  
+            per_frame_loss = F.mse_loss(
+                pred, 
+                target, 
+                reduction='none'
+            ).mean(dim=[1, 3, 4])  
+            
+         
+            cum_error = torch.cumsum(per_frame_loss, dim=1)  
+            
+          
+            weights = 1.0 + cum_error / cum_error[:, -1].unsqueeze(1) 
+            
+            return weights.detach()  
+
+        dyn_weights = dynamic_frame_weights(pred_fake_image_cd, pred_real_image_cd)
+
+
+        def exponential_weights(num_frames: int) -> torch.Tensor:
+            """生成指数递增权重（支持GPU自动转移）
+            Args:
+                num_frames: 视频帧数
+            Returns:
+                weights: [num_frames] 的权重张量
+            """
+            exp_base = 1.2
+            frame_idx = torch.arange(num_frames)
+            weights = torch.pow(exp_base, frame_idx)  
+            return weights / weights.mean()  
+
+        exp_weights = exponential_weights(pred_fake_image_cd.shape[2])  # [T]
+        exp_weights = exp_weights.view(1, -1).expand_as(dyn_weights).to(dyn_weights)  # [B,T]
+
+        hybrid_weights = None
+        hybrid_weights = 0.7 * dyn_weights + 0.3 * exp_weights
+
+
+        grad_motion = (pred_fake_image_cd - pred_real_image_cd)
+
+        # flow_loss = (hybrid_weights * per_frame_grad).mean()
+        # if hybrid_weight is not None:
+
         # TODO: Change the normalizer for causal teacher
         if normalization:
             # Step 4: Gradient normalization (DMD paper eq. 8).
             p_real = (estimated_clean_image_or_video - pred_real_image)
             normalizer = torch.abs(p_real).mean(dim=[1, 2, 3, 4], keepdim=True)
             grad = grad / normalizer
-        grad = torch.nan_to_num(grad)
 
-        return grad, {
+            # motion_grad
+            with torch.no_grad():
+                with torch.autocast("cuda", dtype=self.dtype):
+                    estimated_clean_image_or_video_cd = self.prepare_cd_target(estimated_clean_image_or_video.transpose(1,2), cd_target)
+                    if cd_target in ["learn", "hlearn"]:
+                        estimated_clean_image_or_video_cd = self.target_spatial_head(estimated_clean_image_or_video_cd)
+            p_real_motion = (estimated_clean_image_or_video_cd - pred_real_image_cd)
+            normalizer_motion = torch.abs(p_real_motion).mean(dim=[1, 2, 3, 4], keepdim=True)
+            grad_motion = grad_motion / normalizer_motion
+
+
+
+        grad = torch.nan_to_num(grad)
+        grad_motion = torch.nan_to_num(grad_motion)
+
+        return grad, grad_motion, {
             "dmdtrain_gradient_norm": torch.mean(torch.abs(grad)).detach(),
+            "dmdtrain_gradient_motion_norm": torch.mean(torch.abs(grad_motion)).detach(),
             "timestep": timestep.detach()
         }
+
+
+    def prepare_cd_target(self, latent, target: str, spatial_head: Optional[nn.Module] = None):
+        # latent shape: b, c, t, h, w
+        b, c, t, h, w = latent.shape
+
+        if target in ["raw", "learn", "hlearn"]:
+            return latent
+        # elif target == "learn":
+        #     latent = spatial_head(latent)
+        #     return latent
+        elif target == "diff":
+            latent_prev = latent[:, :, :-1]
+            latent_next = latent[:, :, 1:]
+            diff = latent_next - latent_prev
+            return diff
+        elif target in ["freql", "freqh"]:
+            shape = latent.shape
+            shape = (1, *shape[1:])
+            low_pass_filter = get_free_init_freq_filter(shape, latent.device)
+            if target == "freql":
+                return apply_freq_filter(latent, low_pass_filter, out_freq="low")
+            elif target == "freqh":
+                return apply_freq_filter(latent, low_pass_filter, out_freq="high")
+            else:
+                raise ValueError(f"Invalid target: {target}")
+        elif target in ["lcor", "gcor", "sgcor", "sgcord"]:
+            latent_prev = latent[:, :, :-1]
+            latent_next = latent[:, :, 1:]
+            latent_prev = rearrange(latent_prev, "b c t h w -> (b t) c h w")
+            latent_next = rearrange(latent_next, "b c t h w -> (b t) c h w")
+
+            if target == "lcor":
+                flow, _, corr = local_correlation_softmax(latent_prev, latent_next, 7)
+                return corr
+            elif target in ["gcor", "sgcor", "sgcord"]:
+                flow, _, corr = global_correlation_softmax(latent_prev, latent_next)
+                if target == "gcor":
+                    return corr
+                elif target == "sgcor":
+                    return corr * (h**0.5)
+                elif target == "sgcord":
+                    raise NotImplementedError("Not implemented yet")
+        else:
+            raise ValueError(f"Invalid target: {target}")
+
+
 
     def compute_distribution_matching_loss(
         self,
@@ -176,14 +355,69 @@ class DMD(SelfForcingModel):
                 timestep.flatten(0, 1)
             ).detach().unflatten(0, (batch_size, num_frame))
 
+            # EMA update instead of direct state dict copy
+            update_ema(
+                self.target_spatial_head.parameters(),
+                self.pred_spatial_head.parameters(),
+                rate=self.spatial_head_ema_decay
+            )
+
             # Step 2: Compute the KL grad
-            grad, dmd_log_dict = self._compute_kl_grad(
+            grad, grad_motion, dmd_log_dict = self._compute_kl_grad(
                 noisy_image_or_video=noisy_latent,
                 estimated_clean_image_or_video=original_latent,
                 timestep=timestep,
                 conditional_dict=conditional_dict,
-                unconditional_dict=unconditional_dict
+                unconditional_dict=unconditional_dict,
+                pred_spatial_head = self.pred_spatial_head,
+                target_spatial_head = self.target_spatial_head,   
             )
+
+        cd_target = "learn"
+        with torch.no_grad():
+            with torch.autocast("cuda", dtype=self.dtype):
+                original_latent_cd = self.prepare_cd_target(original_latent.transpose(1,2), cd_target)
+                if cd_target in ["learn", "hlearn"]:
+                    original_latent_cd = self.target_spatial_head(original_latent_cd)
+
+        # 
+
+
+        def dynamic_frame_weights(pred, target):
+      
+            per_frame_loss = F.mse_loss(
+                pred, 
+                target, 
+                reduction='none'
+            ).mean(dim=[1, 3, 4])  
+            
+          
+            cum_error = torch.cumsum(per_frame_loss, dim=1)  # [2, 21]
+          
+            weights = 1.0 + cum_error / cum_error[:, -1].unsqueeze(1)  
+            
+            return weights.detach() 
+
+        dyn_weights = dynamic_frame_weights(grad_motion, original_latent_cd)
+
+
+        def exponential_weights(num_frames: int) -> torch.Tensor:
+            """生成指数递增权重（支持GPU自动转移）
+            Args:
+                num_frames: 视频帧数
+            Returns:
+                weights: [num_frames] 的权重张量
+            """
+            exp_base = 1.2
+            frame_idx = torch.arange(num_frames)
+            weights = torch.pow(exp_base, frame_idx)  
+            return weights / weights.mean() 
+
+        exp_weights = exponential_weights(grad_motion.shape[2])  # [T]
+        exp_weights = exp_weights.view(1, -1).expand_as(dyn_weights).to(dyn_weights)  # [B,T]
+
+        hybrid_weights = 0.7 * dyn_weights + 0.3 * exp_weights
+
 
         if gradient_mask is not None:
             dmd_loss = 0.5 * F.mse_loss(original_latent.double(
@@ -191,7 +425,24 @@ class DMD(SelfForcingModel):
         else:
             dmd_loss = 0.5 * F.mse_loss(original_latent.double(
             ), (original_latent.double() - grad.double()).detach(), reduction="mean")
-        return dmd_loss, dmd_log_dict
+        
+            diff = (original_latent_cd.double() - grad_motion.double()).detach()  # [B, C, T, H, W]
+
+        
+            squared_error = (original_latent_cd.double() - diff) ** 2  # [B, C, T, H, W]
+            weighted_squared_error = squared_error * hybrid_weights.view(1, 1, -1, 1, 1) 
+
+     
+            dmd_motion_loss = weighted_squared_error.mean() 
+            dmd_original_loss = dmd_loss
+            if self.args.use_dmd_loss:
+                dmd_loss = dmd_loss + 1.0 * dmd_motion_loss
+
+
+
+       
+
+        return dmd_loss, dmd_motion_loss, dmd_original_loss, dmd_log_dict
 
     def generator_loss(
         self,
@@ -199,7 +450,8 @@ class DMD(SelfForcingModel):
         conditional_dict: dict,
         unconditional_dict: dict,
         clean_latent: torch.Tensor,
-        initial_latent: torch.Tensor = None
+        initial_latent: torch.Tensor = None,
+        current_step=None,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Generate image/videos from noise and compute the DMD loss.
@@ -219,11 +471,12 @@ class DMD(SelfForcingModel):
         pred_image, gradient_mask, denoised_timestep_from, denoised_timestep_to = self._run_generator(
             image_or_video_shape=image_or_video_shape,
             conditional_dict=conditional_dict,
-            initial_latent=initial_latent
+            initial_latent=initial_latent,
+            current_step=current_step,
         )
 
         # Step 2: Compute the DMD loss
-        dmd_loss, dmd_log_dict = self.compute_distribution_matching_loss(
+        dmd_loss, dmd_motion_loss, dmd_original_loss, dmd_log_dict = self.compute_distribution_matching_loss(
             image_or_video=pred_image,
             conditional_dict=conditional_dict,
             unconditional_dict=unconditional_dict,
@@ -232,7 +485,7 @@ class DMD(SelfForcingModel):
             denoised_timestep_to=denoised_timestep_to
         )
 
-        return dmd_loss, dmd_log_dict
+        return dmd_loss, dmd_motion_loss, dmd_original_loss, dmd_log_dict, pred_image
 
     def critic_loss(
         self,
@@ -268,6 +521,9 @@ class DMD(SelfForcingModel):
         # Step 2: Compute the fake prediction
         min_timestep = denoised_timestep_to if self.ts_schedule and denoised_timestep_to is not None else self.min_score_timestep
         max_timestep = denoised_timestep_from if self.ts_schedule_max and denoised_timestep_from is not None else self.num_train_timestep
+        min_timestep = self.min_score_timestep
+        max_timestep = self.num_train_timestep
+        
         critic_timestep = self._get_timestep(
             min_timestep,
             max_timestep,

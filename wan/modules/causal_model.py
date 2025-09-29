@@ -8,6 +8,8 @@ from wan.modules.model import (
     MLPProj,
     sinusoidal_embedding_1d
 )
+# from utils.ema_utils import EMAManager, EMAMLPWrapper, create_ema_mlp_from_sequential
+
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from torch.nn.attention.flex_attention import BlockMask
@@ -16,10 +18,10 @@ import torch.nn as nn
 import torch
 import math
 import torch.distributed as dist
+import torch.nn.functional as F
+import yaml
+import argparse
 
-# wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
-# see https://github.com/pytorch/pytorch/issues/133254
-# change to default for other models
 flex_attention = torch.compile(
     flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs")
 
@@ -92,7 +94,8 @@ class CausalWanSelfAttention(nn.Module):
         block_mask,
         kv_cache=None,
         current_start=0,
-        cache_start=None
+        cache_start=None,
+        block_index=None,
     ):
         r"""
         Args:
@@ -115,6 +118,7 @@ class CausalWanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
 
+        # 
         if kv_cache is None:
             # if it is teacher forcing training?
             is_tf = (s == seq_lens[0].item() * 2)
@@ -224,8 +228,10 @@ class CausalWanSelfAttention(nn.Module):
                 # Assign new keys/values directly up to current_end
                 local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
                 local_start_index = local_end_index - num_new_tokens
+                # try:
                 kv_cache["k"][:, local_start_index:local_end_index] = roped_key
                 kv_cache["v"][:, local_start_index:local_end_index] = v
+
             x = attention(
                 roped_query,
                 kv_cache["k"][:, max(0, local_end_index - self.max_attention_size):local_end_index],
@@ -233,6 +239,7 @@ class CausalWanSelfAttention(nn.Module):
             )
             kv_cache["global_end_index"].fill_(current_end)
             kv_cache["local_end_index"].fill_(local_end_index)
+
 
         # output
         x = x.flatten(2)
@@ -252,6 +259,7 @@ class CausalWanAttentionBlock(nn.Module):
                  qk_norm=True,
                  cross_attn_norm=False,
                  eps=1e-6):
+           
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -260,6 +268,7 @@ class CausalWanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        # self.use_ema_ffn = use_ema_ffn
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
@@ -273,11 +282,12 @@ class CausalWanAttentionBlock(nn.Module):
                                                                       qk_norm,
                                                                       eps)
         self.norm2 = WanLayerNorm(dim, eps)
+        
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
             nn.Linear(ffn_dim, dim))
-
-        # modulation
+        
+    
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
     def forward(
@@ -293,7 +303,8 @@ class CausalWanAttentionBlock(nn.Module):
         kv_cache=None,
         crossattn_cache=None,
         current_start=0,
-        cache_start=None
+        cache_start=None,
+        block_index=None,
     ):
         r"""
         Args:
@@ -313,7 +324,7 @@ class CausalWanAttentionBlock(nn.Module):
         y = self.self_attn(
             (self.norm1(x).unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * (1 + e[1]) + e[0]).flatten(1, 2),
             seq_lens, grid_sizes,
-            freqs, block_mask, kv_cache, current_start, cache_start)
+            freqs, block_mask, kv_cache, current_start, cache_start, block_index) # , block_index
 
         # with amp.autocast(dtype=torch.float32):
         x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * e[2]).flatten(1, 2)
@@ -324,14 +335,17 @@ class CausalWanAttentionBlock(nn.Module):
                                     context_lens, crossattn_cache=crossattn_cache)
             y = self.ffn(
                 (self.norm2(x).unflatten(dim=1, sizes=(num_frames,
-                 frame_seqlen)) * (1 + e[4]) + e[3]).flatten(1, 2)
+                  frame_seqlen)) * (1 + e[4]) + e[3]).flatten(1, 2)
             )
-            # with amp.autocast(dtype=torch.float32):
+         
             x = x + (y.unflatten(dim=1, sizes=(num_frames,
                      frame_seqlen)) * e[5]).flatten(1, 2)
             return x
 
+        # if block_index < 15:
         x = cross_attn_ffn(x, context, context_lens, e, crossattn_cache)
+
+
         return x
 
 
@@ -452,24 +466,35 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        # self.use_ema = use_ema
+        # self.ema_decay = ema_decay
+
+        # # Initialize EMA manager
+        # if use_ema:
+        #     self.ema_manager = EMAManager(decay=ema_decay, update_after=100, update_every=10)
+        # else:
+        #     self.ema_manager = None
 
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
-        self.text_embedding = nn.Sequential(
+        
+        self.text_embedding = nn.Sequential( 
             nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
             nn.Linear(dim, dim))
-
+  
         self.time_embedding = nn.Sequential(
             nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
+        # time_proj_module = nn.Sequential(
         self.time_projection = nn.Sequential(
             nn.SiLU(), nn.Linear(dim, dim * 6))
+        
 
-        # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
             CausalWanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
                                     local_attn_size, sink_size, qk_norm, cross_attn_norm, eps)
+                         
             for _ in range(num_layers)
         ])
 
@@ -489,10 +514,10 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         if model_type == 'i2v':
             self.img_emb = MLPProj(1280, dim)
 
-        # initialize weights
         self.init_weights()
 
-        self.gradient_checkpointing = False
+   
+        self.gradient_checkpointing = True
 
         self.block_mask = None
 
@@ -548,15 +573,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 f" cache a block wise causal mask with block size of {num_frame_per_block} frames")
             print(block_mask)
 
-        # import imageio
-        # import numpy as np
-        # from torch.nn.attention.flex_attention import create_mask
-
-        # mask = create_mask(attention_mask, B=None, H=None, Q_LEN=total_length +
-        #                    padded_length, KV_LEN=total_length + padded_length, device=device)
-        # import cv2
-        # mask = cv2.resize(mask[0, 0].cpu().float().numpy(), (1024, 1024))
-        # imageio.imwrite("mask_%d.jpg" % (0), np.uint8(255. * mask))
+    
 
         return block_mask
 
@@ -697,15 +714,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 f" cache a block wise causal mask with block size of {num_frame_per_block} frames")
             print(block_mask)
 
-        # import imageio
-        # import numpy as np
-        # from torch.nn.attention.flex_attention import create_mask
 
-        # mask = create_mask(attention_mask, B=None, H=None, Q_LEN=total_length +
-        #                    padded_length, KV_LEN=total_length + padded_length, device=device)
-        # import cv2
-        # mask = cv2.resize(mask[0, 0].cpu().float().numpy(), (1024, 1024))
-        # imageio.imwrite("mask_%d.jpg" % (0), np.uint8(255. * mask))
 
         return block_mask
 
@@ -720,7 +729,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         kv_cache: dict = None,
         crossattn_cache: dict = None,
         current_start: int = 0,
-        cache_start: int = 0
+        cache_start: int = 0,
+        block_index=None
     ):
         r"""
         Run the diffusion model with kv caching.
@@ -809,7 +819,14 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                 return module(*inputs, **kwargs)
             return custom_forward
 
+
+        first_block_shift = True
+        shift_chunk_num = 3
+        shift_size = int(x.shape[1] / len(self.blocks) * len(self.blocks) / shift_chunk_num ) 
+        
+
         for block_index, block in enumerate(self.blocks):
+      
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 kwargs.update(
                     {
@@ -829,10 +846,14 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         "kv_cache": kv_cache[block_index],
                         "crossattn_cache": crossattn_cache[block_index],
                         "current_start": current_start,
-                        "cache_start": cache_start
+                        "cache_start": cache_start,
+                        "block_index": block_index,
                     }
                 )
+                # x = block(x, block_index, **kwargs)
                 x = block(x, **kwargs)
+
+
 
         # head
         x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))
@@ -850,6 +871,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         aug_t=None,
         clip_fea=None,
         y=None,
+        # block_index=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -1056,3 +1078,5 @@ class CausalWanModel(ModelMixin, ConfigMixin):
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)
+        
+

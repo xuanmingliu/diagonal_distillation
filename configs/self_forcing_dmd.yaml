@@ -1,26 +1,39 @@
-generator_ckpt: checkpoints/ode_init.pt
+# generator_ckpt: checkpoints/ode_init.pt
+# generator_ckpt: /mnt/bn/jinxiuliu-hl/Long_Video_Gen/causal_distill/Self-Forcing/logs/self_forcing_dmd/20250621_163509/checkpoint_model_000500/model.pt
+generator_ckpt: /home/liujinxiu/new_self-forcing/causvid_20250731_1616_6000.pt
 generator_fsdp_wrap_strategy: size
 real_score_fsdp_wrap_strategy: size
 fake_score_fsdp_wrap_strategy: size
 real_name: Wan2.1-T2V-14B
 text_encoder_fsdp_wrap_strategy: size
+# non diagonal denoising
 denoising_step_list:
 - 1000
 - 750
-- 500
+- 500 # # 
 - 250
+# denoising_step_list:/
+# diagonal denoising
+# denoising_step_list:
+# - 1000
+# - 100
+# denoising_step_list:
+# - 1000
+# - 100
+# denoising_step_list:
+# - 1000
 warp_denoising_step: true # need to remove - 0 in denoising_step_list if warp_denoising_step is true
 ts_schedule: false
 num_train_timestep: 1000
 timestep_shift: 5.0
-guidance_scale: 3.0
+guidance_scale: 10000
 denoising_loss_type: flow
 mixed_precision: true
 seed: 0
-wandb_host: WANDB_HOST
-wandb_key: WANDB_KEY
-wandb_entity: WANDB_ENTITY
-wandb_project: WANDB_PROJECT
+wandb_host: https://api.wandb.ai
+wandb_key: 83c8b4fae66688de78447903057c6d2e9a077758
+wandb_entity: brandonliu
+wandb_project: causvid
 sharding_strategy: hybrid_full
 lr: 2.0e-06
 lr_critic: 4.0e-07
@@ -44,8 +57,13 @@ image_or_video_shape:
 - 104
 distribution_loss: dmd
 trainer: score_distillation
-gradient_checkpointing: true
+# trainer: gan
+gradient_checkpointing: false
 num_frame_per_block: 3
 load_raw_video: false
 model_kwargs:
   timestep_shift: 5.0
+use_swin_attention : false
+use_diagonal_denoising : false
+use_motion_loss : true
+num_rollout: 10

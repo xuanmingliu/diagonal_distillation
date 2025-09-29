@@ -26,7 +26,7 @@ from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller
 
 # Parse arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--port', type=int, default=5001)
+parser.add_argument('--port', type=int, default=5013)
 parser.add_argument('--host', type=str, default='0.0.0.0')
 parser.add_argument("--checkpoint_path", type=str, default='./checkpoints/self_forcing_dmd.pt')
 parser.add_argument("--config_path", type=str, default='./configs/self_forcing_dmd.yaml')
@@ -298,7 +298,7 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         noise = torch.randn([1, 21, 16, 60, 104], device=gpu, dtype=torch.float16, generator=rnd)
 
         # Generation parameters
-        num_blocks = 7
+        num_blocks = 16
         current_start_frame = 0
         num_input_frames = 0
         all_num_frames = [pipeline.num_frame_per_block] * num_blocks

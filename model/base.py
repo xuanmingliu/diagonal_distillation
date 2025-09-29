@@ -8,7 +8,7 @@ from pipeline import SelfForcingTrainingPipeline
 from utils.loss import get_denoising_loss
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
-
+# 
 class BaseModel(nn.Module):
     def __init__(self, args, device):
         super().__init__()
@@ -104,7 +104,8 @@ class SelfForcingModel(BaseModel):
         self,
         image_or_video_shape,
         conditional_dict: dict,
-        initial_latent: torch.tensor = None
+        initial_latent: torch.tensor = None,
+        current_step=None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Optionally simulate the generator's input from noise using backward simulation
@@ -149,8 +150,10 @@ class SelfForcingModel(BaseModel):
         pred_image_or_video, denoised_timestep_from, denoised_timestep_to = self._consistency_backward_simulation(
             noise=torch.randn(noise_shape,
                               device=self.device, dtype=self.dtype),
+            current_step=current_step,
             **conditional_dict,
         )
+        
         # Slice last 21 frames
         if pred_image_or_video.shape[1] > 21:
             with torch.no_grad():
@@ -182,7 +185,8 @@ class SelfForcingModel(BaseModel):
     def _consistency_backward_simulation(
         self,
         noise: torch.Tensor,
-        **conditional_dict: dict
+        current_step=None,
+        **conditional_dict: dict,
     ) -> torch.Tensor:
         """
         Simulate the generator's input from noise to avoid training/inference mismatch.
@@ -200,7 +204,9 @@ class SelfForcingModel(BaseModel):
             self._initialize_inference_pipeline()
 
         return self.inference_pipeline.inference_with_trajectory(
-            noise=noise, **conditional_dict
+            noise=noise, 
+            current_step=current_step,
+            **conditional_dict
         )
 
     def _initialize_inference_pipeline(self):
@@ -220,3 +226,250 @@ class SelfForcingModel(BaseModel):
             num_max_frames=self.num_training_frames,
             context_noise=self.args.context_noise
         )
+
+import torch
+import torch.nn as nn
+from diffusers import ConfigMixin, ModelMixin
+from diffusers.configuration_utils import register_to_config
+from einops import rearrange
+# 
+
+class SpatialHead(ModelMixin, ConfigMixin):
+    @register_to_config
+    def __init__(
+        self,
+        num_channels: int,
+        num_layers: int,
+        kernel_size: int = 3,
+        hidden_dim: int = 64,
+        norm_num_groups: int = 32,
+        norm_eps: float = 1e-5,
+    ):
+        assert num_layers >= 2, "num_layers must be at least 2"
+
+        super().__init__()
+        self.num_channels = num_channels
+        self.num_layers = num_layers
+        self.kernel_size = kernel_size
+        self.padding = (kernel_size - 1) // 2
+
+        self.in_act = nn.SiLU()
+        self.layers = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        num_channels if i == 0 else hidden_dim,
+                        hidden_dim,
+                        kernel_size=self.kernel_size,
+                        padding=self.padding,
+                    ),
+                    nn.GroupNorm(
+                        num_groups=norm_num_groups,
+                        num_channels=hidden_dim,
+                        eps=norm_eps,
+                    ),
+                    nn.SiLU(),
+                )
+                for i in range(num_layers - 1)
+            ]
+        )
+
+        self.conv_out = nn.Conv2d(hidden_dim, num_channels, kernel_size=1, padding=0)
+
+        # zero initialize the last layer
+        nn.init.zeros_(self.conv_out.weight)
+        nn.init.zeros_(self.conv_out.bias)
+
+    # def forward(self, x):
+    #     # x shape: b, c, t, h, w
+    #     b, c, t, h, w = x.shape
+    #     x_in = x
+    #     x = rearrange(x, "b c t h w -> (b t) c h w").contiguous()  # 强制拷贝
+    #     x = self.in_act(x)
+    #     for layer in self.layers:
+    #         x = layer(x)
+
+    #     x = self.conv_out(x)
+    #     x = rearrange(x, "(b t) c h w -> b c t h w", b=b, t=t).contiguous()
+    #     x = x + x_in  # 非 inplace 操作
+    #     return x
+
+    def forward(self, x):
+        # x shape: (b, c, t, h, w)
+        b, c, t, h, w = x.shape
+        x_in = x  # 保存原始输入
+        
+        # 替代 rearrange(x, "b c t h w -> (b t) c h w")
+        x_reshaped = torch.zeros(b * t, c, h, w, dtype=x.dtype, device=x.device)
+        for bi in range(b):
+            for ti in range(t):
+                x_reshaped[bi * t + ti] = x[bi, :, ti]  # 手动展开时间维度
+        
+        # 正常处理卷积
+        x_reshaped = self.in_act(x_reshaped)
+        for layer in self.layers:
+            x_reshaped = layer(x_reshaped)
+        x_reshaped = self.conv_out(x_reshaped)
+        
+        # 替代 rearrange(x, "(b t) c h w -> b c t h w")
+        x_out = torch.zeros(b, c, t, h, w, dtype=x.dtype, device=x.device)
+        for bi in range(b):
+            for ti in range(t):
+                x_out[bi, :, ti] = x_reshaped[bi * t + ti]  # 手动恢复时间维度
+        
+        return x_out + x_in  # 非inplace加法
+
+class TemporalHead(ModelMixin, ConfigMixin):
+    @register_to_config
+    def __init__(
+        self,
+        num_channels: int,
+        num_layers: int,
+        kernel_size: int = 3,
+        hidden_dim: int = 64,
+        norm_num_groups: int = 32,
+        norm_eps: float = 1e-5,
+    ):
+        assert num_layers >= 2, "num_layers must be at least 2"
+
+        super().__init__()
+        self.num_channels = num_channels
+        self.num_layers = num_layers
+        self.kernel_size = kernel_size
+        self.padding = (kernel_size - 1) // 2
+
+        self.in_act = nn.SiLU()
+        self.layers = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv1d(
+                        num_channels if i == 0 else hidden_dim,
+                        hidden_dim,
+                        kernel_size=self.kernel_size,
+                        padding=self.padding,
+                    ),
+                    nn.GroupNorm(
+                        num_groups=norm_num_groups,
+                        num_channels=hidden_dim,
+                        eps=norm_eps,
+                    ),
+                    nn.SiLU(),
+                )
+                for i in range(num_layers - 1)
+            ]
+        )
+
+        self.conv_out = nn.Conv1d(hidden_dim, num_channels, kernel_size=1, padding=0)
+
+        # zero initialize the last layer
+        nn.init.zeros_(self.conv_out.weight)
+        nn.init.zeros_(self.conv_out.bias)
+
+    def forward(self, x):
+        # x shape: b, c, t, h, w -> b*h*w, c, t
+        b, c, t, h, w = x.shape
+        x_in = x
+        x = rearrange(x, "b c t h w -> (b h w) c t")
+        x = self.in_act(x)
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.conv_out(x)
+
+        x = rearrange(x, "(b h w) c t -> b c t h w", b=b, h=h, w=w)
+        x = x + x_in
+        return x
+
+
+
+class IdentitySpatialHead(ModelMixin, ConfigMixin):
+    @register_to_config
+    def __init__(self):
+        super().__init__()
+
+        self.identity_layer = nn.Identity()
+
+    def forward(self, x):
+        return self.identity_layer(x)
+
+
+class UpsamplingModule(nn.Module):
+    """
+    上采样模块实现，包含单个卷积层和PixelShuffle操作
+    参数:
+        in_channels: 输入特征图的通道数
+        r: 上采样因子(默认=4)
+    """
+    def __init__(self, in_channels, out_channels, r=4):
+        super(UpsamplingModule, self).__init__()
+        self.r = r
+        
+        # 单个卷积层：增加通道数为r²倍
+
+        self.conv0 = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,  # 输出通道数 = in_channels × r²
+            kernel_size=3,
+            padding=1,
+            stride=1
+        )
+
+        self.conv1 = nn.Conv2d(
+            in_channels=out_channels,
+            out_channels=out_channels * (r ** 2),  # 输出通道数 = in_channels × r²
+            kernel_size=3,
+            padding=1,
+            stride=1
+        )
+
+
+        
+        # PixelShuffle操作：将通道数转换为空间分辨率
+        self.pixel_shuffle = nn.PixelShuffle(r)
+        
+        # 可选：初始化卷积层权重
+        nn.init.kaiming_normal_(self.conv0.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.conv1.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.conv0.bias, 0)
+        nn.init.constant_(self.conv1.bias, 0)
+
+    def forward(self, x):
+        """
+        前向传播
+        输入x形状: (batch_size, in_channels, H, W)
+        输出形状: (batch_size, in_channels, H*r, W*r)
+        """
+        # 1. 通过卷积增加通道数
+        x = self.conv0(x)
+
+        x = self.conv1(x)  # 输出形状: (batch, in_channels*r², H, W)
+        
+        # 2. 应用PixelShuffle进行上采样
+        x = self.pixel_shuffle(x)  # 输出形状: (batch, in_channels, H*r, W*r)
+        
+        return x
+
+# 使用示例
+# if __name__ == "__main__":
+#     # 创建模块实例
+#     upsampler = UpsamplingModule(in_channels=16, out_channels=3, r=4)
+    
+#     # 创建随机输入 (batch=2, channels=64, height=32, width=32)
+#     input_tensor = torch.randn(2, 16, 32, 32)
+    
+#     # 前向传播
+#     output = upsampler(input_tensor)
+    
+#     print(f"输入形状: {input_tensor.shape}")
+#     print(f"输出形状: {output.shape}")
+#     # 预期输出: torch.Size([2, 64, 128, 128])
+
+if __name__ == "__main__":
+    head = SpatialHead(num_channels=4, num_layers=3)
+    # head = TemporalHead(num_channels=4, num_layers=3)
+    x = torch.randn(2, 4, 3, 64, 64)
+    out = head(x)
+    diff = out - x
+    # print(diff.abs().max())
+    print(out.shape)
+

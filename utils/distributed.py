@@ -7,7 +7,7 @@ from torch.distributed.fsdp import FullStateDictConfig, FullyShardedDataParallel
 from torch.distributed.fsdp.api import CPUOffload
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 
-
+# 
 def fsdp_state_dict(model):
     fsdp_fullstate_save_policy = FullStateDictConfig(
         offload_to_cpu=True, rank0_only=True

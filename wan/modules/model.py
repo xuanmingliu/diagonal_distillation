@@ -8,6 +8,7 @@ from diffusers.models.modeling_utils import ModelMixin
 from einops import repeat
 
 from .attention import flash_attention
+# from utils.ema_utils import EMAManager, EMAMLPWrapper, create_ema_mlp_from_sequential
 
 __all__ = ['WanModel']
 
@@ -283,6 +284,8 @@ class WanAttentionBlock(nn.Module):
                  qk_norm=True,
                  cross_attn_norm=False,
                  eps=1e-6):
+                #  use_ema_ffn=True,
+                #  ema_decay=0.999):
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -291,6 +294,7 @@ class WanAttentionBlock(nn.Module):
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        # self.use_ema_ffn = use_ema_ffn
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
@@ -305,9 +309,22 @@ class WanAttentionBlock(nn.Module):
                                                                       qk_norm,
                                                                       eps)
         self.norm2 = WanLayerNorm(dim, eps)
+        
+        # # Create FFN with optional EMA wrapping
+        # ffn_module = nn.Sequential(
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
             nn.Linear(ffn_dim, dim))
+        
+        # if use_ema_ffn:
+        #     self.ffn = create_ema_mlp_from_sequential(
+        #         ffn_module, 
+        #         decay=ema_decay,
+        #         update_after=100,
+        #         update_every=10
+        #     )
+        # else:
+        #     self.ffn = ffn_module
 
         # modulation
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
@@ -346,6 +363,18 @@ class WanAttentionBlock(nn.Module):
         def cross_attn_ffn(x, context, context_lens, e):
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
             y = self.ffn(self.norm2(x) * (1 + e[4]) + e[3])
+            # # Process FFN input
+            # ffn_input = self.norm2(x) * (1 + e[4]) + e[3]
+            
+            # # Apply FFN (with EMA if enabled)
+            # if self.use_ema_ffn and self.training:
+            #     # Update EMA parameters during training
+            #     if isinstance(self.ffn, EMAMLPWrapper):
+            #         self.ffn.update_parameters()
+            #     y = self.ffn(ffn_input)
+            # else:
+            #     y = self.ffn(ffn_input)
+            
             # with amp.autocast(dtype=torch.float32):
             x = x + y * e[5]
             return x
@@ -522,6 +551,8 @@ class WanModel(ModelMixin, ConfigMixin):
                  qk_norm=True,
                  cross_attn_norm=True,
                  eps=1e-6):
+                #  use_ema=True,
+                #  ema_decay=0.999):
         r"""
         Initialize the diffusion model backbone.
 
@@ -578,24 +609,56 @@ class WanModel(ModelMixin, ConfigMixin):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.local_attn_size = 21
+        # self.use_ema = use_ema
+        # self.ema_decay = ema_decay
+
+        # # Initialize EMA manager
+        # if use_ema:
+        #     self.ema_manager = EMAManager(decay=ema_decay, update_after=100, update_every=10)
+        # else:
+        #     self.ema_manager = None
 
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
+        
+        # # Create text embedding with optional EMA
+        # text_emb_module = nn.Sequential(
         self.text_embedding = nn.Sequential(
             nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
             nn.Linear(dim, dim))
+        # if use_ema:
+        #     self.text_embedding = self.ema_manager.wrap_module(
+        #         "text_embedding", text_emb_module, is_mlp=True
+        #     )
+        # else:
+        #     self.text_embedding = text_emb_module
 
+        # # Create time embeddings with optional EMA
+        # time_emb_module = nn.Sequential(
         self.time_embedding = nn.Sequential(
             nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.time_projection = nn.Sequential(
+        # time_proj_module = nn.Sequential(
+        self.time_embedding = nn.Sequential(
             nn.SiLU(), nn.Linear(dim, dim * 6))
+        
+        # if use_ema:
+        #     self.time_embedding = self.ema_manager.wrap_module(
+        #         "time_embedding", time_emb_module, is_mlp=True
+        #     )
+        #     self.time_projection = self.ema_manager.wrap_module(
+        #         "time_projection", time_proj_module, is_mlp=True
+        #     )
+        # else:
+        #     self.time_embedding = time_emb_module
+        #     self.time_projection = time_proj_module
 
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
             WanAttentionBlock(cross_attn_type, dim, ffn_dim, num_heads,
                               window_size, qk_norm, cross_attn_norm, eps)
+                            #   use_ema_ffn=use_ema, ema_decay=ema_decay)
             for _ in range(num_layers)
         ])
 
@@ -614,11 +677,19 @@ class WanModel(ModelMixin, ConfigMixin):
 
         if model_type == 'i2v':
             self.img_emb = MLPProj(1280, dim)
+            # img_emb_module = MLPProj(1280, dim)
+            # if use_ema:
+            #     self.img_emb = self.ema_manager.wrap_module(
+            #         "img_emb", img_emb_module, is_mlp=True
+            #     )
+            # else:
+            #     self.img_emb = img_emb_module
 
         # initialize weights
         self.init_weights()
 
-        self.gradient_checkpointing = False
+        # self.gradient_checkpointing = False
+        self.gradient_checkpointing = True
 
     def _set_gradient_checkpointing(self, module, value=False):
         self.gradient_checkpointing = value
@@ -921,3 +992,33 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)
+
+    # def update_ema(self):
+    #     """Update all EMA parameters."""
+    #     if self.use_ema and self.ema_manager is not None:
+    #         self.ema_manager.update_all()
+    
+    # def copy_params_to_ema(self):
+    #     """Copy current parameters to EMA parameters."""
+    #     if self.use_ema and self.ema_manager is not None:
+    #         self.ema_manager.copy_params_to_ema_all()
+    
+    # def copy_ema_to_params(self):
+    #     """Copy EMA parameters to current parameters."""
+    #     if self.use_ema and self.ema_manager is not None:
+    #         self.ema_manager.copy_ema_to_params_all()
+    
+    # def get_ema_norm_stats(self):
+    #     """Get EMA parameter norm statistics."""
+    #     if self.use_ema and self.ema_manager is not None:
+    #         return self.ema_manager.get_all_norm_stats()
+    #     return {}
+    
+    # def set_ema_mode(self, use_ema_params: bool = True):
+    #     """Set whether to use EMA parameters for inference.""" 
+    #     if not self.use_ema or self.ema_manager is None:
+    #         return
+            
+    #     for wrapper in self.ema_manager.wrapped_modules.values():
+    #         if hasattr(wrapper, '_ema_mode'):
+    #             wrapper._ema_mode = use_ema_params

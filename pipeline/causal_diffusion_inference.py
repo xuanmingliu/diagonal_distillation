@@ -137,7 +137,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=initial_latent[:, :1],
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_pos,
+                    kv_cache=self.kv_cache_pos, 
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length
@@ -157,7 +157,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 # Assume num_input_frames is self.num_frame_per_block * num_input_blocks
                 assert num_input_frames % self.num_frame_per_block == 0
                 num_input_blocks = num_input_frames // self.num_frame_per_block
-
+            # 
             for block_index in range(num_input_blocks):
                 current_ref_latents = \
                     initial_latent[:, cache_start_frame:cache_start_frame + self.num_frame_per_block]

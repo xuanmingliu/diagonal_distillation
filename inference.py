@@ -9,6 +9,7 @@ from einops import rearrange
 import torch.distributed as dist
 from torch.utils.data import DataLoader, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+import torch.nn.functional as F
 
 from pipeline import (
     CausalDiffusionInferencePipeline,
@@ -16,6 +17,14 @@ from pipeline import (
 )
 from utils.dataset import TextDataset, TextImagePairDataset
 from utils.misc import set_seed
+from PIL import Image
+
+import debugpy
+
+if int(os.environ.get("RANK", 0)) == 0:  # 仅主进程调试
+    debugpy.listen(("0.0.0.0", 10092))
+    print("Waiting for debugger attach")
+    debugpy.wait_for_client()  # 阻塞直到调试器连接
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str, help="Path to the config file")
@@ -106,9 +115,13 @@ def encode(self, videos: torch.Tensor) -> torch.Tensor:
 
     output = torch.stack(output, dim=0)
     return output
+# 
+
 
 
 for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
+    if i == 1:
+        break
     idx = batch_data['idx'].item()
 
     # For DataLoader batch_size=1, the batch_data is already a single item, but in a batch container
@@ -121,16 +134,44 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
     all_video = []
     num_generated_frames = 0  # Number of generated (latent) frames
 
+    prompt = "running"
+    prompt = "A stunningly detailed digital painting of an adorable blue cartoon kitten with big round black eyes and soft pink blush on its cheeks, sitting in a whimsical enchanted forest at night. The kitten has a fluffy round face and a curious expression, surrounded by vibrant oversized mushrooms with orange caps and white spots. Lush green trees with glowing leaves on the right, mystical purple-barked trees with bioluminescent foliage on the left. Deep blue starry night sky filled with twinkling stars and floating magical light orbs. Fantasy landscape with glowing mushrooms, sparkling fireflies, and ethereal mist. Dreamlike atmosphere with soft bokeh effects, rich colors and intricate details."
+    prompt = "A muscular young man sprinting at full speed on a rain-soaked city street, captured in cinematic slow motion. His athletic wear ripples violently in the gale-force wind, hair streaming backward from velocity, face contorted in absolute focus. The left foot impacts a pavement puddle creating a radial splash explosion. Neon-lit buildings blur into bokeh backgrounds with rain streaks forming light trails, ultra-high-speed photography frozen at 1/1000s shutter speed."
+    args.i2v = False
     if args.i2v:
         # For image-to-video, batch contains image and caption
-        prompt = batch['prompts'][0]  # Get caption from batch
+        # prompt = batch['prompts'][0]  # Get caption from batch
         prompts = [prompt] * args.num_samples
 
         # Process the image
-        image = batch['image'].squeeze(0).unsqueeze(0).unsqueeze(2).to(device=device, dtype=torch.bfloat16)
+        # /mnt/bn/jinxiuliu-hl/Long_Video_Gen/causal_distill/Self-Forcing/example_input_image.jpg
+        # image = batch['image'].squeeze(0).unsqueeze(0).unsqueeze(2).to(device=device, dtype=torch.bfloat16)
+
+        image_path = '/mnt/bn/jinxiuliu-hl/Long_Video_Gen/causal_distill/Self-Forcing/example_input_image.jpg'
+
+        # Load the image using PIL
+        image = Image.open(image_path)
+
+        # Define transformations including resize to 480x832
+        transform = transforms.Compose([
+            transforms.Resize((480, 832)),  # Resize to target dimensions
+            transforms.ToTensor(),          # Convert to tensor [0,1] range
+            # Add any other needed transformations here
+        ])
+
+        # Apply transformations
+        image_tensor = transform(image)
+
+        # Process as in your original snippet with the reshaping
+        image_tensor = image_tensor.unsqueeze(0)  # Add batch dimension
+        image_tensor = image_tensor.squeeze(0).unsqueeze(0).unsqueeze(2)  # Original processing
+        image_tensor = image_tensor.to(device=device, dtype=torch.bfloat16)[:,:3,] * 2 - 1
+
+
 
         # Encode the input image as the first latent
-        initial_latent = pipeline.vae.encode_to_latent(image).to(device=device, dtype=torch.bfloat16)
+        # initial_latent = pipeline.vae.encode_to_latent(image).to(device=device, dtype=torch.bfloat16)
+        initial_latent = pipeline.vae.encode_to_latent(image_tensor).to(device=device, dtype=torch.bfloat16)
         initial_latent = initial_latent.repeat(args.num_samples, 1, 1, 1, 1)
 
         sampled_noise = torch.randn(
@@ -138,42 +179,82 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         )
     else:
         # For text-to-video, batch is just the text prompt
-        prompt = batch['prompts'][0]
-        extended_prompt = batch['extended_prompts'][0] if 'extended_prompts' in batch else None
+        # prompt = batch['prompts'][0]
+        # extended_prompt = batch['extended_prompts'][0] if 'extended_prompts' in batch else None
+        prompt = "Macro shot of a man wearing an antique diving helmet with dark glass and a jetpack walking on the veins of a leaf. Realistic style"
+        extended_prompt = None
+
         if extended_prompt is not None:
             prompts = [extended_prompt] * args.num_samples
         else:
             prompts = [prompt] * args.num_samples
+
         initial_latent = None
+    
+    for seed in range(10, 1000000):
+        # seed = 40
+        torch.manual_seed(seed)  
 
         sampled_noise = torch.randn(
             [args.num_samples, args.num_output_frames, 16, 60, 104], device=device, dtype=torch.bfloat16
         )
 
-    # Generate 81 frames
-    video, latents = pipeline.inference(
-        noise=sampled_noise,
-        text_prompts=prompts,
-        return_latents=True,
-        initial_latent=initial_latent,
-    )
-    current_video = rearrange(video, 'b t c h w -> b t h w c').cpu()
-    all_video.append(current_video)
-    num_generated_frames += latents.shape[1]
+        # Generate 81 frames
+        from datetime import datetime
 
-    # Final output video
-    video = 255.0 * torch.cat(all_video, dim=1)
+        # Record start time
+        start_time = datetime.now()
 
-    # Clear VAE cache
-    pipeline.vae.model.clear_cache()
+        # Run the inference
+        video, latents = pipeline.inference(
+            noise=sampled_noise,
+            text_prompts=prompts,
+            return_latents=True,
+            initial_latent=initial_latent,
+        )
 
-    # Save the video if the current prompt is not a dummy prompt
-    if idx < num_prompts:
-        model = "regular" if not args.use_ema else "ema"
-        for seed_idx in range(args.num_samples):
-            # All processes save their videos
-            if args.save_with_index:
-                output_path = os.path.join(args.output_folder, f'{idx}-{seed_idx}_{model}.mp4')
-            else:
-                output_path = os.path.join(args.output_folder, f'{prompt[:100]}-{seed_idx}.mp4')
-            write_video(output_path, video[seed_idx], fps=16)
+        # Record end time
+        end_time = datetime.now()
+
+
+        # Calculate duration
+        duration = end_time - start_time
+        print(f"Inference completed in: {duration}")
+        
+        current_video = rearrange(video, 'b t c h w -> b t h w c').cpu()
+        # all_video.append(current_video)
+
+        all_video = [current_video]
+
+        num_generated_frames += latents.shape[1]
+
+        # Final output video
+        video = 255.0 * torch.cat(all_video, dim=1)
+
+        # Clear VAE cache
+        pipeline.vae.model.clear_cache()
+
+        # Save the video if the current prompt is not a dummy prompt
+        if idx < num_prompts:
+            model = "regular" if not args.use_ema else "ema"
+            for seed_idx in range(args.num_samples):
+                # All processes save their videos
+
+                current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                # 提取 prompt 的前50个字符（去除空格和特殊字符，避免文件名问题）
+                prompt_snippet =  prompts[0][:50].strip().replace(" ", "_").replace(".", "").replace(",", "") + "-" 
+
+                # 组合成新的视频文件名
+                video_filename = "long_video_output_" + f"{prompt_snippet}_{current_time}.mp4"
+                video_path = os.path.join(args.output_folder, video_filename)
+
+                # export_to_video(
+                #     video, os.path.join(args.output_folder,  video_path), fps=16)
+                    
+                if args.save_with_index:
+                    output_path = os.path.join(args.output_folder, f'{idx}-{seed}_{model}.mp4')
+                else:
+                    output_path = os.path.join(args.output_folder, f'{prompt[:100]}-{seed}-{current_time}.mp4')
+                print(output_path)
+                write_video(output_path, video[seed_idx], fps=16)
