@@ -1,27 +1,14 @@
-# generator_ckpt: checkpoints/ode_init.pt
-# generator_ckpt: /mnt/bn/jinxiuliu-hl/Long_Video_Gen/causal_distill/Self-Forcing/logs/self_forcing_dmd/20250621_163509/checkpoint_model_000500/model.pt
 generator_ckpt: /home/liujinxiu/new_self-forcing/causvid_20250731_1616_6000.pt
 generator_fsdp_wrap_strategy: size
 real_score_fsdp_wrap_strategy: size
 fake_score_fsdp_wrap_strategy: size
 real_name: Wan2.1-T2V-14B
 text_encoder_fsdp_wrap_strategy: size
-# non diagonal denoising
+
 denoising_step_list:
 - 1000
-- 750
-- 500 # # 
-- 250
-# denoising_step_list:/
-# diagonal denoising
-# denoising_step_list:
-# - 1000
-# - 100
-# denoising_step_list:
-# - 1000
-# - 100
-# denoising_step_list:
-# - 1000
+- 100
+
 warp_denoising_step: true # need to remove - 0 in denoising_step_list if warp_denoising_step is true
 ts_schedule: false
 num_train_timestep: 1000
@@ -41,7 +28,7 @@ beta1: 0.0
 beta2: 0.999
 beta1_critic: 0.0
 beta2_critic: 0.999
-data_path: prompts/vidprom_filtered_extended.txt
+data_path: vidprom_filtered_extended.txt
 batch_size: 1
 ema_weight: 0.99
 ema_start_step: 200
@@ -66,4 +53,4 @@ model_kwargs:
 use_swin_attention : false
 use_diagonal_denoising : false
 use_motion_loss : true
-num_rollout: 10
+num_rollout: 1
