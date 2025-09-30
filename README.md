@@ -36,12 +36,12 @@ Large pretrained diffusion models have significantly enhanced the quality of gen
 10. [Acknowledgement](#acknowledgement)
 
 ## News
-- [x] [2025.9.25] We release [Paper](https://arxiv.org/abs/2509.22622), this GitHub repo [LongLive](https://github.com/NVlabs/LongLive) with all training and inference code, the model weight [LongLive-1.3B](https://huggingface.co/Efficient-Large-Model/LongLive-1.3B), and demo page [Website](https://nvlabs.github.io/LongLive).
+- [x] [2025.9.25] We release [Paper](https://arxiv.org/abs/2509.22622), this GitHub repo [diagonal-distillation]( https://diagonal-distillation.github.io/) with all training and inference code, the model weight [LongLive-1.3B](https://huggingface.co/Efficient-Large-Model/LongLive-1.3B).
 
 ## Highlights
 1. **Ultra-Fast Short Video Generation**: The proposed Diagonal Distillation framework achieves ​real-time 31 FPS generation​ for 5-second videos on a single H100 GPU, delivering a ​277.3× speedup​ over the base model while maintaining competitive visual quality.  This represents a 1.53× latency improvement over previous state-of-the-art methods, making it suitable for real-time streaming applications.
-​2. **Asymmetric Denoising Strategy**: Introducing a novel diagonal denoising approach that allocates more steps to early chunks (5 steps) and progressively fewer to later ones (down to 2 steps), rather than uniform step distribution.  This design allows later chunks to inherit rich appearance information from thoroughly processed early chunks, significantly reducing the total number of denoising steps while preserving coherence and detail in short video sequences.
-​3. **Motion-Preserving Distillation**: Incorporating Flow Distribution Matching that explicitly aligns temporal dynamics between teacher and student models, preventing motion degradation and amplitude attenuation under strict step constraints.  This ensures the distilled model not only matches the teacher in per-frame quality but also faithfully preserves motion characteristics crucial for short video synthesis.
+2. **Asymmetric Denoising Strategy**: Introducing a novel diagonal denoising approach that allocates more steps to early chunks (5 steps) and progressively fewer to later ones (down to 2 steps), rather than uniform step distribution.  This design allows later chunks to inherit rich appearance information from thoroughly processed early chunks, significantly reducing the total number of denoising steps while preserving coherence and detail in short video sequences.
+3. **Motion-Preserving Distillation**: Incorporating Flow Distribution Matching that explicitly aligns temporal dynamics between teacher and student models, preventing motion degradation and amplitude attenuation under strict step constraints.  This ensures the distilled model not only matches the teacher in per-frame quality but also faithfully preserves motion characteristics crucial for short video synthesis.
 
 ## Introduction
 <p align="center" style="border-radius: 10px">
@@ -90,11 +90,15 @@ huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2
 huggingface-cli download Efficient-Large-Model/LongLive --local-dir longlive_models
 ```
 
-**Single Prompt Video Generation**
+**Short Video Generation**
 ```
 bash inference.sh
 ```
 
+**GUI demo**
+```
+python demo.py
+```
 
 ## Training
 **Download checkpoints**
@@ -106,8 +110,7 @@ Download Wan2.1-T2V-14B as the teacher model.
 ```
 huggingface-cli download Wan-AI/Wan2.1-T2V-14B --local-dir wan_models/Wan2.1-T2V-14B
 ```
-
-**?**
+**training**
 ```
 bash training.sh
 ```
