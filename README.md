@@ -1,5 +1,5 @@
 <p align="center" style="border-radius: 10px">
-  <img src="assets/logo.jpg" width="100%" alt="logo"/>
+  <img src="assets/logo.jpg" width="50%" alt="logo"/>
 </p>
 
 # 🎬 STREAMING AUTOREGRESSIVE VIDEO GENERATION VIA DIAGONAL DISTILLATION
@@ -10,16 +10,16 @@
 [![Video](https://img.shields.io/badge/YouTube-Video-red)](https://www.youtube.com/watch?v=CO1QC7BNvig)
 [![Demo](https://img.shields.io/badge/Demo-Page-bron)](https://nvlabs.github.io/LongLive)
 
-<div align="center">
+<!-- <div align="center">
 
 [![Watch the video](assets/fancy.mp4)]
 
-</div>
+</div> -->
 
 ## 💡 TLDR: When you input, it only takes about 2.6 seconds to generate a 5-second segment!
 
 **LongLive: Real-time Interactive Long Video Generation [[Paper](https://arxiv.org/abs/2509.22622)]** <br />
-[Shuai Yang](https://andysonys.github.io/), [Wei Huang](https://aaron-weihuang.com/), [Ruihang Chu](https://ruihang-chu.github.io/), [Yicheng Xiao](https://easonxiao-888.github.io/), [Yuyang Zhao](https://yuyangzhao.com/), [Xianbang Wang](https://peppaking8.github.io/), [Muyang Li](https://lmxyy.me/), [Enze Xie](https://xieenze.github.io/), [Yingcong Chen](https://www.yingcong.me/), [Yao Lu](https://scholar.google.com/citations?user=OI7zFmwAAAAJ&hl=en), [Song Han](http://songhan.mit.edu/), [Yukang Chen](https://yukangchen.com/) <br />
+[Jinxiu Liu](https://andysonys.github.io/), [Xuanming Liu](https://aaron-weihuang.com/), [Kangfu Mei](https://ruihang-chu.github.io/), [Yandong Wen](https://easonxiao-888.github.io/), [Ming-Hsuan Yang](https://yuyangzhao.com/), [Weiyang Liu](https://peppaking8.github.io/) <br />
 
 Large pretrained diffusion models have significantly enhanced the quality of gen- erated videos, and yet their use in real-time streaming remains limited. Autore- gressive models offer a natural framework for sequential frame synthesis but re- quire heavy computation to achieve high fidelity. Diffusion distillation can com- press these models into efficient few-step variants, but existing video distillation approaches largely adapt image-specific methods that neglect temporal dependen- cies. These techniques often excel in image generation but underperform in video synthesis, exhibiting reduced motion coherence, error accumulation over long se- quences, and a latency–quality trade-off. We identify two factors that result in these limitations: insufficient utilization of temporal context during step reduction and implicit prediction of subsequent noise levels in next-chunk prediction (ex- posure bias). To address these issues, we propose Diagonal Distillation, which operates orthogonally to existing approaches and better exploits temporal infor- mation across both video chunks and denoising steps. Central to our approach is an asymmetric generation strategy: more steps early, fewer steps later. This design allows later chunks to inherit rich appearance information from thoroughly pro- cessed early chunks, while using partially denoised chunks as conditional inputs for subsequent synthesis. By aligning the implicit prediction of subsequent noise levels during chunk generation with the actual inference conditions, our approach mitigates error propagation and reduces oversaturation in long-range sequences. We further incorporate implicit optical flow modeling to preserve motion qual- ity under strict step constraints. Our method generates a 5-second video in 2.61 seconds (up to 31 FPS), achieving a 277.3× speedup over the undistilled model.
 
