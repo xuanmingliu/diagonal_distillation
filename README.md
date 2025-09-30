@@ -1,101 +1,136 @@
-<p align="center">
-<h1 align="center">Self Forcing</h1>
-<h3 align="center">Bridging the Train-Test Gap in Autoregressive Video Diffusion</h3>
-</p>
-<p align="center">
-  <p align="center">
-    <a href="https://www.xunhuang.me/">Xun Huang</a><sup>1</sup>
-    ·
-    <a href="https://zhengqili.github.io/">Zhengqi Li</a><sup>1</sup>
-    ·
-    <a href="https://guandehe.github.io/">Guande He</a><sup>2</sup>
-    ·
-    <a href="https://mingyuanzhou.github.io/">Mingyuan Zhou</a><sup>2</sup>
-    ·
-    <a href="https://research.adobe.com/person/eli-shechtman/">Eli Shechtman</a><sup>1</sup><br>
-    <sup>1</sup>Adobe Research <sup>2</sup>UT Austin
-  </p>
-  <h3 align="center"><a href="https://self-forcing.github.io/static/self_forcing.pdf">Paper</a> | <a href="https://self-forcing.github.io">Website</a> | <a href="https://huggingface.co/gdhe17/Self-Forcing/tree/main">Models (HuggingFace)</a></h3>
+<p align="center" style="border-radius: 10px">
+  <img src="assets/logo.jpg" width="100%" alt="logo"/>
 </p>
 
----
+# 🎬 STREAMING AUTOREGRESSIVE VIDEO GENERATION VIA DIAGONAL DISTILLATION
 
-Self Forcing trains autoregressive video diffusion models by **simulating the inference process during training**, performing autoregressive rollout with KV caching. It resolves the train-test distribution mismatch and enables **real-time, streaming video generation on a single RTX 4090** while matching the quality of state-of-the-art diffusion models.
+[![Paper](https://img.shields.io/badge/ArXiv-Paper-brown)](https://arxiv.org/abs/2509.22622)
+[![Code](https://img.shields.io/badge/GitHub-LongLive-blue)](https://github.com/NVlabs/LongLive)
+[![Model](https://img.shields.io/badge/HuggingFace-Model-yellow)](https://huggingface.co/Efficient-Large-Model/LongLive-1.3B)
+[![Video](https://img.shields.io/badge/YouTube-Video-red)](https://www.youtube.com/watch?v=CO1QC7BNvig)
+[![Demo](https://img.shields.io/badge/Demo-Page-bron)](https://nvlabs.github.io/LongLive)
 
----
+<div align="center">
+
+[![Watch the video](assets/fancy.mp4)]
+
+</div>
+
+## 💡 TLDR: When you input, it only takes about 2.6 seconds to generate a 5-second segment!
+
+**LongLive: Real-time Interactive Long Video Generation [[Paper](https://arxiv.org/abs/2509.22622)]** <br />
+[Shuai Yang](https://andysonys.github.io/), [Wei Huang](https://aaron-weihuang.com/), [Ruihang Chu](https://ruihang-chu.github.io/), [Yicheng Xiao](https://easonxiao-888.github.io/), [Yuyang Zhao](https://yuyangzhao.com/), [Xianbang Wang](https://peppaking8.github.io/), [Muyang Li](https://lmxyy.me/), [Enze Xie](https://xieenze.github.io/), [Yingcong Chen](https://www.yingcong.me/), [Yao Lu](https://scholar.google.com/citations?user=OI7zFmwAAAAJ&hl=en), [Song Han](http://songhan.mit.edu/), [Yukang Chen](https://yukangchen.com/) <br />
+
+Large pretrained diffusion models have significantly enhanced the quality of gen- erated videos, and yet their use in real-time streaming remains limited. Autore- gressive models offer a natural framework for sequential frame synthesis but re- quire heavy computation to achieve high fidelity. Diffusion distillation can com- press these models into efficient few-step variants, but existing video distillation approaches largely adapt image-specific methods that neglect temporal dependen- cies. These techniques often excel in image generation but underperform in video synthesis, exhibiting reduced motion coherence, error accumulation over long se- quences, and a latency–quality trade-off. We identify two factors that result in these limitations: insufficient utilization of temporal context during step reduction and implicit prediction of subsequent noise levels in next-chunk prediction (ex- posure bias). To address these issues, we propose Diagonal Distillation, which operates orthogonally to existing approaches and better exploits temporal infor- mation across both video chunks and denoising steps. Central to our approach is an asymmetric generation strategy: more steps early, fewer steps later. This design allows later chunks to inherit rich appearance information from thoroughly pro- cessed early chunks, while using partially denoised chunks as conditional inputs for subsequent synthesis. By aligning the implicit prediction of subsequent noise levels during chunk generation with the actual inference conditions, our approach mitigates error propagation and reduces oversaturation in long-range sequences. We further incorporate implicit optical flow modeling to preserve motion qual- ity under strict step constraints. Our method generates a 5-second video in 2.61 seconds (up to 31 FPS), achieving a 277.3× speedup over the undistilled model.
+
+## TABLE OF CONTENTS
+1. [News](#news)
+2. [Highlights](#highlights)
+3. [Introduction](#introduction)
+4. [Installation](#installation)
+5. [Inference](#inference)
+6. [Training](#training)
+7. [How to contribute](#how-to-contribute)
+8. [Citation](#citation)
+9. [License](#license)
+10. [Acknowledgement](#acknowledgement)
+
+## News
+- [x] [2025.9.25] We release [Paper](https://arxiv.org/abs/2509.22622), this GitHub repo [LongLive](https://github.com/NVlabs/LongLive) with all training and inference code, the model weight [LongLive-1.3B](https://huggingface.co/Efficient-Large-Model/LongLive-1.3B), and demo page [Website](https://nvlabs.github.io/LongLive).
+
+## Highlights
+1. **Ultra-Fast Short Video Generation**: The proposed Diagonal Distillation framework achieves ​real-time 31 FPS generation​ for 5-second videos on a single H100 GPU, delivering a ​277.3× speedup​ over the base model while maintaining competitive visual quality.  This represents a 1.53× latency improvement over previous state-of-the-art methods, making it suitable for real-time streaming applications.
+​2. **Asymmetric Denoising Strategy**: Introducing a novel diagonal denoising approach that allocates more steps to early chunks (5 steps) and progressively fewer to later ones (down to 2 steps), rather than uniform step distribution.  This design allows later chunks to inherit rich appearance information from thoroughly processed early chunks, significantly reducing the total number of denoising steps while preserving coherence and detail in short video sequences.
+​3. **Motion-Preserving Distillation**: Incorporating Flow Distribution Matching that explicitly aligns temporal dynamics between teacher and student models, preventing motion degradation and amplitude attenuation under strict step constraints.  This ensures the distilled model not only matches the teacher in per-frame quality but also faithfully preserves motion characteristics crucial for short video synthesis.
+
+## Introduction
+<p align="center" style="border-radius: 10px">
+  <img src="assets/figure_1.png" width="100%" alt="logo"/>
+<strong>Our Diagonal Distillation framework achieves comparable quality to the full-step model while significantly reducing latency. The method yields a 1.88× speedup on 5-second short video generation on a single H100 GPU.</strong>
+</p>
+<p align="center" style="border-radius: 10px">
+  <img src="assets/figure_3.png" width="100%" alt="logo"/>
+<strong>Diagonal Denoising with Diagonal Forcing and Progressive Step Reduction. We illustrate our method starting with 5 denoising steps for the first chunk and progressively reducing them to 2 steps by Chunk 7 . For chunks with k ≥ 4, we use a fixed two-step denoising process, reusing the Key-Value (KV) cache from the previous chunk’s last noisy frame. This approach maintains temporal coherence while reducing latency, the pseudo-code is provided in the appendix.</strong>
+</p>
+<p align="center" style="border-radius: 10px">
+  <img src="assets/figure_6.png" width="100%" alt="logo"/>
+<strong>(a) Without motion loss shows minimal motion amplitude with only slight object movement; (b) With motion loss demonstrates significantly increased motion amplitude throughout the entire frame, validating our method’s effectiveness.</strong>
+</p>
 
 
-https://github.com/user-attachments/assets/7548c2db-fe03-4ba8-8dd3-52d2c6160739
 
+## Installation
+**Requirements**
 
-## Requirements
 We tested this repo on the following setup:
-* Nvidia GPU with at least 24 GB memory (RTX 4090, A100, and H100 are tested).
+* Nvidia GPU with at least 40 GB memory (A100, and H100 are tested).
 * Linux operating system.
 * 64 GB RAM.
 
 Other hardware setup could also work but hasn't been tested.
 
-## Installation
+**Environment**
+
 Create a conda environment and install dependencies:
 ```
-conda create -n self_forcing python=3.10 -y
-conda activate self_forcing
+git clone https://github.com/xuanmingliu/diagonal_distillation.git
+cd diagonal_distillation
+conda create -n diagonal_distillation python=3.10 -y
+conda activate diagonal_distillation
 pip install -r requirements.txt
 pip install flash-attn --no-build-isolation
 python setup.py develop
 ```
 
-## Quick Start
-### Download checkpoints
+## Inference
+**Download checkpoints**
+
 ```
-huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir-use-symlinks False --local-dir wan_models/Wan2.1-T2V-1.3B
-huggingface-cli download gdhe17/Self-Forcing checkpoints/self_forcing_dmd.pt --local-dir .
+huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir wan_models/Wan2.1-T2V-1.3B
+huggingface-cli download Efficient-Large-Model/LongLive --local-dir longlive_models
 ```
 
-### GUI demo
+**Single Prompt Video Generation**
 ```
-python demo.py
+bash inference.sh
 ```
-Note:
-* **Our model works better with long, detailed prompts** since it's trained with such prompts. We will integrate prompt extension into the codebase (similar to [Wan2.1](https://github.com/Wan-Video/Wan2.1/tree/main?tab=readme-ov-file#2-using-prompt-extention)) in the future. For now, it is recommended to use third-party LLMs (such as GPT-4o) to extend your prompt before providing to the model.
-* You may want to adjust FPS so it plays smoothly on your device.
-* The speed can be improved by enabling `torch.compile`, [TAEHV-VAE](https://github.com/madebyollin/taehv/), or using FP8 Linear layers, although the latter two options may sacrifice quality. It is recommended to use `torch.compile` if possible and enable TAEHV-VAE if further speedup is needed.
 
-### CLI Inference
-Example inference script using the chunk-wise autoregressive checkpoint trained with DMD:
-```
-python inference.py \
-    --config_path configs/self_forcing_dmd.yaml \
-    --output_folder videos/self_forcing_dmd \
-    --checkpoint_path checkpoints/self_forcing_dmd.pt \
-    --data_path prompts/MovieGenVideoBench_extended.txt \
-    --use_ema
-```
-Other config files and corresponding checkpoints can be found in [configs](configs) folder and our [huggingface repo](https://huggingface.co/gdhe17/Self-Forcing/tree/main/checkpoints).
 
 ## Training
-### Download text prompts and ODE initialized checkpoint
-```
-huggingface-cli download gdhe17/Self-Forcing checkpoints/ode_init.pt --local-dir .
-huggingface-cli download gdhe17/Self-Forcing vidprom_filtered_extended.txt --local-dir prompts
-```
-Note: Our training algorithm (except for the GAN version) is data-free (**no video data is needed**). For now, we directly provide the ODE initialization checkpoint and will add more instructions on how to perform ODE initialization in the future (which is identical to the process described in the [CausVid](https://github.com/tianweiy/CausVid) repo).
+**Download checkpoints**
 
-### Self Forcing Training with DMD
-```
-torchrun --nnodes=8 --nproc_per_node=8 --rdzv_id=5235 \
-  --rdzv_backend=c10d \
-  --rdzv_endpoint $MASTER_ADDR \
-  train.py \
-  --config_path configs/self_forcing_dmd.yaml \
-  --logdir logs/self_forcing_dmd \
-  --disable-wandb
-```
-Our training run uses 600 iterations and completes in under 2 hours using 64 H100 GPUs. By implementing gradient accumulation, it should be possible to reproduce the results in less than 16 hours using 8 H100 GPUs.
+Please follow [Self-Forcing](https://github.com/guandeh17/Self-Forcing) to download text prompts and ODE initialized checkpoint.
 
-## Acknowledgements
-This codebase is built on top of the open-source implementation of [CausVid](https://github.com/tianweiy/CausVid) by [Tianwei Yin](https://tianweiy.github.io/) and the [Wan2.1](https://github.com/Wan-Video/Wan2.1) repo.
+Download Wan2.1-T2V-14B as the teacher model.
+
+```
+huggingface-cli download Wan-AI/Wan2.1-T2V-14B --local-dir wan_models/Wan2.1-T2V-14B
+```
+
+**?**
+```
+bash training.sh
+```
+
+
+## How to contribute
+- Make sure to have git installed.
+- Create your own [fork](https://github.com/NVlabs/LongLive/fork) of the project.
+- Clone the repository on your local machine, using git clone and pasting the url of this project.
+- Read both the `Requirements` and `Installation and Quick Guide` sections below.
+- Commit and push your changes.
+- Make a pull request when finished modifying the project.
+
 
 ## Citation
-To be added.
+Please consider to cite our paper and this framework, if they are helpful in your research.
+```bibtex
+
+```
+
+## License
+
+
+## Acknowledgement
+- [Self-Forcing](https://github.com/guandeh17/Self-Forcing): the codebase and algorithm we built upon. Thanks for their wonderful work.
+- [Wan](https://github.com/Wan-Video/Wan2.1): the base model we built upon. Thanks for their wonderful work.
